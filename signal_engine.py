@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 import anthropic
+from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -23,9 +24,12 @@ WATCHLIST = [
 
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY')
 
-# Initialize Anthropic client
+# Initialize clients
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 def get_news(ticker: str) -> List[Dict[str, Any]]:
     """
@@ -174,6 +178,47 @@ Only return the JSON object, no additional text.
             'summary': f'Error during analysis: {str(e)}'
         }
 
+def save_signal_to_db(sentiment: Dict[str, Any], article_count: int) -> bool:
+    """
+    Save sentiment analysis result to Supabase signals table.
+    
+    Args:
+        sentiment (Dict): Sentiment analysis results
+        article_count (int): Number of articles analyzed
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        print(f"✗ Supabase credentials not found, skipping database save for {sentiment['ticker']}")
+        return False
+    
+    try:
+        # Prepare data for insertion
+        signal_data = {
+            'ticker': sentiment['ticker'],
+            'sentiment_score': sentiment['sentiment_score'],
+            'direction': sentiment['direction'],
+            'confidence': sentiment['confidence'],
+            'summary': sentiment['summary'],
+            'article_count': article_count,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        # Insert into Supabase
+        result = supabase.table('signals').insert(signal_data).execute()
+        
+        if result.data:
+            print(f"💾 Successfully saved {sentiment['ticker']} signal to database (ID: {result.data[0].get('id', 'unknown')})")
+            return True
+        else:
+            print(f"✗ Failed to save {sentiment['ticker']} signal to database")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Database error for {sentiment['ticker']}: {e}")
+        return False
+
 def format_sentiment_output(sentiment: Dict[str, Any]) -> str:
     """Format sentiment analysis for console output."""
     direction_emoji = {
@@ -213,6 +258,10 @@ def main():
         # Analyze sentiment
         sentiment = score_sentiment(ticker, news_articles)
         results.append(sentiment)
+        
+        # Save to database if sentiment analysis was successful
+        article_count = len(news_articles)
+        save_signal_to_db(sentiment, article_count)
         
         # Print results
         print(format_sentiment_output(sentiment))
