@@ -1,91 +1,55 @@
-# Stock Signal Engine
+# Stock Bot 🤖
 
-An automated stock sentiment analysis system that analyzes news for a watchlist of stocks using Finnhub API and Claude AI, then stores results in Supabase.
+An autonomous stock trading system that uses AI-powered sentiment analysis to execute daily trades on Alpaca's paper trading platform.
 
-## Features
+## How It Works
 
-- 📊 Analyzes 10 major tech stocks: AAPL, NVDA, MSFT, GOOGL, AMZN, META, TSLA, JPM, V, AMD
-- 📰 Fetches last 7 days of company news from Finnhub API
-- 🧠 Uses Claude Haiku 4.5 for cost-effective sentiment analysis
-- 💾 Automatically saves results to Supabase database
-- ⏰ Runs daily at 8:00 AM Eastern time via APScheduler
-- 📝 Comprehensive logging to both console and file
+1. **8:00 AM** — Signal engine pulls the latest news for 30 tickers from Finnhub, scores sentiment using Claude AI (bullish/bearish/neutral with confidence rating), and stores results in Supabase
+2. **8:30 AM** — Trader reads today's signals and opens positions for any ticker scoring 7+ bullish
+3. **Every 30 min (9AM–3:30PM)** — Position manager checks all open positions and closes anything hitting -5% stop loss or +10% take profit
+4. **3:45 PM** — EOD close liquidates all remaining positions and logs a daily performance snapshot
 
-## Setup
+## Stack
 
-1. **Install Dependencies:**
-   ```bash
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
+- **Python** — core system
+- **Anthropic Claude API** — LLM sentiment scoring
+- **Finnhub API** — live news feed
+- **Alpaca API** — paper trade execution
+- **Supabase** — signal history, trade log, performance snapshots
+- **APScheduler** — job scheduling
+- **Railway** — cloud deployment (runs 24/7 without local machine)
 
-2. **Configure Environment:**
-   - Copy `.env` and fill in your API keys:
-     - `FINNHUB_API_KEY`: Get from [Finnhub](https://finnhub.io/)
-     - `ANTHROPIC_API_KEY`: Get from [Anthropic](https://console.anthropic.com/)
-     - `SUPABASE_URL` & `SUPABASE_SECRET_KEY`: From your Supabase project
+## Architecture
 
-3. **Database Setup:**
-   Create a `signals` table in Supabase with these columns:
-   ```sql
-   CREATE TABLE signals (
-     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-     ticker TEXT NOT NULL,
-     sentiment_score INTEGER NOT NULL,
-     direction TEXT NOT NULL,
-     confidence TEXT NOT NULL,
-     summary TEXT NOT NULL,
-     article_count INTEGER NOT NULL,
-     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-   );
-   ```
+signal_engine.py     # News ingestion + Claude sentiment scoring
+trader.py            # Alpaca order execution based on signals
+position_manager.py  # Stop loss / take profit / EOD close logic
+scheduler.py         # Orchestrates all jobs on a daily cron schedule
+
+## Database Tables
+
+- `signals` — daily sentiment scores per ticker (score, direction, confidence, summary)
+- `trades` — full trade lifecycle (entry price, exit price, P&L, exit reason)
+- `performance_snapshots` — daily portfolio value vs SPY benchmark
 
 ## Usage
 
-### Run Signal Engine Once
-```bash
-python signal_engine.py
-```
-
-### Run Scheduler (Daily at 8 AM ET)
-```bash
+Normal operation (runs all jobs on schedule):
 python scheduler.py
-```
 
-### Test Scheduler Immediately
-```bash
-python scheduler.py --run-now
-```
+Test individual components:
+python scheduler.py --run-signals
+python scheduler.py --run-trader
+python scheduler.py --run-manager
+python scheduler.py --run-eod
 
-## Files
+## Configuration
 
-- `signal_engine.py` - Core sentiment analysis engine
-- `scheduler.py` - Daily scheduler using APScheduler  
-- `.env` - Environment variables (not in git)
-- `.gitignore` - Git ignore rules
-- `requirements.txt` - Python dependencies
-- `scheduler.log` - Scheduler logs
-
-## Output Example
-
-```
-🟢 GOOGL | Score: 8/10 | BULLISH 🔥
-   Summary: Strong AI infrastructure investments and cloud growth drive positive sentiment
-   Confidence: high
-💾 Successfully saved GOOGL signal to database (ID: 955629ea-baee-4d31-95c5-67b139795dbb)
-```
-
-## Logging
-
-The scheduler creates detailed logs in `scheduler.log` and console output, including:
-- Job start/end times
-- Duration tracking  
-- Success/failure status
-- Database save confirmations
-- Error handling
-
-## Cost Optimization
-
-- Uses Claude Haiku 4.5 for low-cost sentiment analysis
-- Limits to 20 most recent articles per ticker
-- Efficient API usage with proper error handling
+Create a .env file with:
+ALPACA_API_KEY=
+ALPACA_SECRET_KEY=
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+FINNHUB_API_KEY=
+ANTHROPIC_API_KEY=
+SUPABASE_URL=
+SUPABASE_SECRET_KEY=
