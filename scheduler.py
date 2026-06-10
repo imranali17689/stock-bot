@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 # Import main functions from both modules
 from signal_engine import main as run_signal_engine
 from trader import main as run_trader
+from position_manager import check_and_exit_positions, close_all_positions
 
 # Load environment variables
 load_dotenv()
@@ -94,6 +95,68 @@ def trader_job():
         # Re-raise the exception for APScheduler to handle
         raise
 
+def position_manager_job():
+    """
+    Wrapper function for the position manager job with logging.
+    """
+    job_start_time = datetime.now()
+    logger.info("🛡️ Starting Position Manager job...")
+    logger.info(f"📅 Position Manager started at: {job_start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    try:
+        # Run the position manager function
+        check_and_exit_positions()
+        
+        job_end_time = datetime.now()
+        duration = job_end_time - job_start_time
+        
+        logger.info("✅ Position Manager job completed successfully!")
+        logger.info(f"⏱️  Position Manager finished at: {job_end_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        logger.info(f"⌚ Position Manager duration: {duration.total_seconds():.1f} seconds")
+        
+    except Exception as e:
+        job_end_time = datetime.now()
+        duration = job_end_time - job_start_time
+        
+        logger.error("❌ Position Manager job failed!")
+        logger.error(f"🐛 Position Manager error: {str(e)}")
+        logger.error(f"⏱️  Position Manager failed at: {job_end_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        logger.error(f"⌚ Position Manager duration before failure: {duration.total_seconds():.1f} seconds")
+        
+        # Re-raise the exception for APScheduler to handle
+        raise
+
+def eod_close_job():
+    """
+    Wrapper function for the EOD close job with logging.
+    """
+    job_start_time = datetime.now()
+    logger.info("🔔 Starting EOD Close - Liquidating all positions...")
+    logger.info(f"📅 EOD Close started at: {job_start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    try:
+        # Run the EOD close function
+        close_all_positions()
+        
+        job_end_time = datetime.now()
+        duration = job_end_time - job_start_time
+        
+        logger.info("✅ EOD Close job completed successfully!")
+        logger.info(f"⏱️  EOD Close finished at: {job_end_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        logger.info(f"⌚ EOD Close duration: {duration.total_seconds():.1f} seconds")
+        
+    except Exception as e:
+        job_end_time = datetime.now()
+        duration = job_end_time - job_start_time
+        
+        logger.error("❌ EOD Close job failed!")
+        logger.error(f"🐛 EOD Close error: {str(e)}")
+        logger.error(f"⏱️  EOD Close failed at: {job_end_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        logger.error(f"⌚ EOD Close duration before failure: {duration.total_seconds():.1f} seconds")
+        
+        # Re-raise the exception for APScheduler to handle
+        raise
+
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
     logger.info("🛑 Received shutdown signal, stopping scheduler...")
@@ -135,9 +198,33 @@ def main():
         replace_existing=True
     )
     
+    # Job 3: Position Manager every 30 minutes during market hours (9 AM - 3 PM)
+    scheduler.add_job(
+        func=position_manager_job,
+        trigger=CronTrigger(hour='9-15', minute='0,30', day_of_week='mon-fri', timezone=eastern),
+        id='position_manager',
+        name='Position Management - Stop Loss & Take Profit',
+        max_instances=1,  # Prevent overlapping jobs
+        misfire_grace_time=300,  # Allow 5 minutes grace period for missed jobs
+        replace_existing=True
+    )
+    
+    # Job 4: EOD Close at 3:45 PM Eastern (15 minutes before market close)
+    scheduler.add_job(
+        func=eod_close_job,
+        trigger=CronTrigger(hour=15, minute=45, day_of_week='mon-fri', timezone=eastern),
+        id='eod_close',
+        name='End of Day Position Close',
+        max_instances=1,  # Prevent overlapping jobs
+        misfire_grace_time=60,  # Allow 1 minute grace period for missed jobs
+        replace_existing=True
+    )
+    
     logger.info("📅 Scheduled daily jobs:")
     logger.info("   🔍 Signal Engine: 8:00 AM Eastern Time")
     logger.info("   💰 Trader: 8:30 AM Eastern Time")
+    logger.info("   🛡️ Position Manager: Every 30 min, 9:00 AM - 3:30 PM (Mon-Fri)")
+    logger.info("   🔔 EOD Close: 3:45 PM Eastern Time (Mon-Fri)")
     logger.info("   ⏱️  30-minute delay ensures signal analysis completes first")
     
     # Handle command line options for testing
@@ -159,6 +246,16 @@ def main():
             trader_job()
             logger.info("🧪 Both jobs completed, exiting...")
             return
+        elif sys.argv[1] == '--run-manager':
+            logger.info("🧪 Running position manager immediately for testing...")
+            position_manager_job()
+            logger.info("🧪 Position manager test completed, exiting...")
+            return
+        elif sys.argv[1] == '--run-eod':
+            logger.info("🧪 Running EOD close immediately for testing...")
+            eod_close_job()
+            logger.info("🧪 EOD close test completed, exiting...")
+            return
         elif sys.argv[1] == '--run-now':
             # Backward compatibility
             logger.info("🧪 Running signal engine immediately for testing...")
@@ -173,6 +270,8 @@ def main():
         logger.info("   --run-signals: Test signal engine only")
         logger.info("   --run-trader: Test trader only") 
         logger.info("   --run-both: Test both jobs in sequence")
+        logger.info("   --run-manager: Test position manager only")
+        logger.info("   --run-eod: Test EOD close only")
         scheduler.start()
     except KeyboardInterrupt:
         logger.info("🛑 Scheduler stopped by user")
