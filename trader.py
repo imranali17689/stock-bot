@@ -167,6 +167,44 @@ def get_positions() -> List[Dict[str, Any]]:
         print(f"✗ Unexpected error fetching positions: {e}")
         return []
 
+def log_trade_entry(ticker: str, order_response: Dict[str, Any], notional_value: float, 
+                   sentiment_score: int, direction: str) -> bool:
+    """
+    Log trade entry to Supabase trades table.
+    
+    Args:
+        ticker (str): Stock symbol
+        order_response (Dict): Alpaca order response
+        notional_value (float): Dollar amount invested
+        sentiment_score (int): Sentiment score from signal
+        direction (str): Signal direction (bullish/bearish)
+        
+    Returns:
+        bool: True if logged successfully, False otherwise
+    """
+    try:
+        trade_data = {
+            'ticker': ticker,
+            'entry_time': datetime.now().isoformat(),
+            'notional_value': notional_value,
+            'sentiment_score': sentiment_score,
+            'direction': direction,
+            'shares': float(order_response.get('filled_qty', 0)) if order_response.get('filled_qty') else 0.0
+        }
+        
+        result = supabase.table('trades').insert(trade_data).execute()
+        
+        if result.data:
+            print(f"📝 Trade entry logged for {ticker}")
+            return True
+        else:
+            print(f"⚠️ Failed to log trade entry for {ticker}")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️ Error logging trade entry for {ticker}: {e}")
+        return False
+
 def get_todays_signals() -> List[Dict[str, Any]]:
     """
     Fetch today's most recent signals from Supabase (one per ticker).
@@ -289,6 +327,8 @@ def execute_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
                     if order:
                         trade_summary['buy_orders'] += 1
                         trade_summary['total_buy_amount'] += MAX_POSITION_SIZE
+                        # Log trade entry
+                        log_trade_entry(ticker, order, MAX_POSITION_SIZE, sentiment_score, direction)
                     else:
                         trade_summary['errors'] += 1
                         
