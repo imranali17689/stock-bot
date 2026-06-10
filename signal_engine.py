@@ -18,8 +18,22 @@ load_dotenv()
 
 # Configuration
 WATCHLIST = [
-    'AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 
-    'META', 'TSLA', 'JPM', 'V', 'AMD'
+    # Mega cap tech
+    'AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA',
+    # Financials
+    'JPM', 'V', 'MA', 'BAC', 'GS',
+    # Semiconductors
+    'AMD', 'INTC', 'AVGO', 'TSM',
+    # Consumer
+    'WMT', 'COST', 'NKE', 'MCD',
+    # Healthcare
+    'JNJ', 'UNH', 'PFE',
+    # Energy
+    'XOM', 'CVX',
+    # ETFs for macro signal
+    'SPY', 'QQQ',
+    # High momentum
+    'PLTR', 'COIN', 'SNOW'
 ]
 
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
