@@ -7,7 +7,7 @@ Executes trades based on sentiment signals using Alpaca Paper Trading API.
 import os
 import json
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -168,7 +168,7 @@ def get_positions() -> List[Dict[str, Any]]:
         return []
 
 def log_trade_entry(ticker: str, order_response: Dict[str, Any], notional_value: float, 
-                   sentiment_score: int, direction: str) -> bool:
+                   sentiment_score: int, direction: str, rolling_avg_score: float = None) -> bool:
     """
     Log trade entry to Supabase trades table.
     
@@ -189,7 +189,8 @@ def log_trade_entry(ticker: str, order_response: Dict[str, Any], notional_value:
             'notional_value': notional_value,
             'sentiment_score': sentiment_score,
             'direction': direction,
-            'shares': float(order_response.get('filled_qty', 0)) if order_response.get('filled_qty') else 0.0
+            'shares': float(order_response.get('filled_qty', 0)) if order_response.get('filled_qty') else 0.0,
+            'rolling_avg_score': rolling_avg_score if rolling_avg_score is not None else sentiment_score
         }
         
         result = supabase.table('trades').insert(trade_data).execute()
@@ -205,72 +206,104 @@ def log_trade_entry(ticker: str, order_response: Dict[str, Any], notional_value:
         print(f"⚠️ Error logging trade entry for {ticker}: {e}")
         return False
 
-def get_todays_signals() -> List[Dict[str, Any]]:
+def get_rolling_sentiment_signals() -> List[Dict[str, Any]]:
     """
-    Fetch today's most recent signals from Supabase (one per ticker).
+    Fetch signals with 3-day rolling averages for sentiment scores.
     
     Returns:
-        List[Dict]: List of today's most recent signals per ticker
+        List[Dict]: List of signals with rolling averages per ticker
     """
     try:
-        today = date.today().isoformat()
+        # Calculate date range for last 3 days
+        today = date.today()
+        three_days_ago = today - timedelta(days=3)
         
-        # Use raw SQL query with DISTINCT ON to get most recent signal per ticker
-        # This ensures we only get the latest signal for each ticker from today
-        query = """
-        SELECT DISTINCT ON (ticker) *
-        FROM signals 
-        WHERE created_at >= %s
-        ORDER BY ticker, created_at DESC
-        """
+        today_str = today.isoformat()
+        three_days_ago_str = three_days_ago.isoformat()
         
-        result = supabase.rpc('execute_sql', {
-            'query': query,
-            'params': [today]
-        }).execute()
+        # Get all signals from last 3 days
+        all_recent_signals = supabase.table('signals').select('*').gte('created_at', three_days_ago_str).order('created_at', desc=True).execute()
         
-        # Alternative approach using Supabase client if RPC doesn't work
-        if not result.data:
-            # Fallback: get all today's signals and filter in Python
-            all_signals = supabase.table('signals').select('*').gte('created_at', today).order('created_at', desc=True).execute()
-            
-            if all_signals.data:
-                # Group by ticker and keep only the most recent
-                ticker_signals = {}
-                for signal in all_signals.data:
-                    ticker = signal['ticker']
-                    if ticker not in ticker_signals:
-                        ticker_signals[ticker] = signal
-                
-                result.data = list(ticker_signals.values())
+        if not all_recent_signals.data:
+            print("📡 No signals found for the last 3 days")
+            return []
         
-        if result.data:
-            print(f"📡 Found {len(result.data)} unique ticker signals from today")
-            # Print which tickers we got signals for
-            tickers = [signal['ticker'] for signal in result.data]
-            print(f"   📊 Tickers: {', '.join(sorted(tickers))}")
-            return result.data
-        else:
+        # Get today's most recent signals for direction and confidence
+        todays_signals = supabase.table('signals').select('*').gte('created_at', today_str).order('created_at', desc=True).execute()
+        
+        if not todays_signals.data:
             print("📡 No signals found for today")
             return []
+        
+        # Group today's signals by ticker (keep most recent)
+        todays_by_ticker = {}
+        for signal in todays_signals.data:
+            ticker = signal['ticker']
+            if ticker not in todays_by_ticker:
+                todays_by_ticker[ticker] = signal
+        
+        # Group all recent signals by ticker
+        signals_by_ticker = {}
+        for signal in all_recent_signals.data:
+            ticker = signal['ticker']
+            if ticker not in signals_by_ticker:
+                signals_by_ticker[ticker] = []
+            signals_by_ticker[ticker].append(signal)
+        
+        # Calculate rolling averages
+        rolling_signals = []
+        
+        for ticker in todays_by_ticker:
+            today_signal = todays_by_ticker[ticker]
             
+            # Get last 3 days of signals for this ticker (limit to 3 most recent)
+            recent_signals = signals_by_ticker.get(ticker, [])[:3]
+            
+            if recent_signals:
+                # Calculate rolling average of sentiment scores
+                sentiment_scores = [s['sentiment_score'] for s in recent_signals]
+                rolling_avg_score = sum(sentiment_scores) / len(sentiment_scores)
+                
+                # Create enhanced signal with rolling average
+                enhanced_signal = today_signal.copy()
+                enhanced_signal['rolling_avg_score'] = rolling_avg_score
+                enhanced_signal['days_in_average'] = len(sentiment_scores)
+                
+                rolling_signals.append(enhanced_signal)
+                
+                print(f"📊 {ticker}: Rolling avg {rolling_avg_score:.1f} (last {len(sentiment_scores)} days: {sentiment_scores})")
+            else:
+                # Fallback to today's signal only
+                enhanced_signal = today_signal.copy()
+                enhanced_signal['rolling_avg_score'] = today_signal['sentiment_score']
+                enhanced_signal['days_in_average'] = 1
+                rolling_signals.append(enhanced_signal)
+                
+                print(f"📊 {ticker}: No historical data, using today's score {today_signal['sentiment_score']}")
+        
+        print(f"📡 Calculated rolling averages for {len(rolling_signals)} tickers")
+        return rolling_signals
+        
     except Exception as e:
-        print(f"✗ Error fetching signals from database: {e}")
-        # Fallback to original method if advanced query fails
+        print(f"✗ Error calculating rolling sentiment signals: {e}")
+        # Fallback to today's signals only
         try:
             today = date.today().isoformat()
-            all_signals = supabase.table('signals').select('*').gte('created_at', today).order('created_at', desc=True).execute()
+            fallback_signals = supabase.table('signals').select('*').gte('created_at', today).order('created_at', desc=True).execute()
             
-            if all_signals.data:
-                # Group by ticker and keep only the most recent
+            if fallback_signals.data:
+                # Group by ticker and keep only the most recent, add rolling_avg_score = sentiment_score
                 ticker_signals = {}
-                for signal in all_signals.data:
+                for signal in fallback_signals.data:
                     ticker = signal['ticker']
                     if ticker not in ticker_signals:
-                        ticker_signals[ticker] = signal
+                        enhanced_signal = signal.copy()
+                        enhanced_signal['rolling_avg_score'] = signal['sentiment_score']
+                        enhanced_signal['days_in_average'] = 1
+                        ticker_signals[ticker] = enhanced_signal
                 
                 result_data = list(ticker_signals.values())
-                print(f"📡 Found {len(result_data)} unique ticker signals from today (fallback method)")
+                print(f"📡 Fallback: Using {len(result_data)} today's signals without rolling average")
                 return result_data
             return []
         except Exception as fallback_error:
@@ -308,35 +341,38 @@ def execute_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     for signal in signals:
         ticker = signal['ticker']
-        sentiment_score = signal['sentiment_score']
-        direction = signal['direction']
-        confidence = signal['confidence']
+        sentiment_score = signal['sentiment_score']  # Today's score for display
+        rolling_avg_score = signal.get('rolling_avg_score', sentiment_score)  # 3-day average for decisions
+        direction = signal['direction']  # Today's direction for decisions
+        confidence = signal['confidence']  # Today's confidence
+        days_in_avg = signal.get('days_in_average', 1)
         
-        print(f"\n📊 {ticker} | Score: {sentiment_score}/10 | {direction.upper()} | {confidence}")
+        print(f"\n📊 {ticker} | Today: {sentiment_score}/10 | 3-Day Avg: {rolling_avg_score:.1f}/10 | {direction.upper()} | {confidence}")
+        print(f"   📈 Rolling average based on {days_in_avg} day(s)")
         
         try:
-            # Determine action based on sentiment
-            if direction == 'bullish' and sentiment_score >= BULLISH_THRESHOLD:
+            # Determine action based on rolling average score and today's direction
+            if direction == 'bullish' and rolling_avg_score >= BULLISH_THRESHOLD:
                 # Buy signal
                 if ticker in position_symbols:
                     print(f"   ⚠️  Already hold {ticker} (${position_symbols[ticker]:,.2f}), skipping buy")
                     trade_summary['skipped'] += 1
                 else:
-                    print(f"   🟢 BUY signal triggered")
+                    print(f"   🟢 BUY signal triggered (Rolling avg: {rolling_avg_score:.1f} >= {BULLISH_THRESHOLD})")
                     order = place_order(ticker, 'buy', MAX_POSITION_SIZE)
                     if order:
                         trade_summary['buy_orders'] += 1
                         trade_summary['total_buy_amount'] += MAX_POSITION_SIZE
-                        # Log trade entry
-                        log_trade_entry(ticker, order, MAX_POSITION_SIZE, sentiment_score, direction)
+                        # Log trade entry with rolling average
+                        log_trade_entry(ticker, order, MAX_POSITION_SIZE, sentiment_score, direction, rolling_avg_score)
                     else:
                         trade_summary['errors'] += 1
                         
-            elif direction == 'bearish' and sentiment_score <= BEARISH_THRESHOLD:
+            elif direction == 'bearish' and rolling_avg_score <= BEARISH_THRESHOLD:
                 # Sell signal
                 if ticker in position_symbols:
                     current_value = position_symbols[ticker]
-                    print(f"   🔴 SELL signal triggered for existing position")
+                    print(f"   🔴 SELL signal triggered for existing position (Rolling avg: {rolling_avg_score:.1f} <= {BEARISH_THRESHOLD})")
                     order = place_order(ticker, 'sell', current_value)
                     if order:
                         trade_summary['sell_orders'] += 1
@@ -349,7 +385,12 @@ def execute_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
                     
             else:
                 # No action
-                action_reason = "neutral sentiment" if direction == 'neutral' else f"score {sentiment_score} below threshold"
+                if direction == 'neutral':
+                    action_reason = "neutral sentiment"
+                elif direction == 'bullish':
+                    action_reason = f"rolling avg {rolling_avg_score:.1f} below buy threshold ({BULLISH_THRESHOLD})"
+                else:  # bearish
+                    action_reason = f"rolling avg {rolling_avg_score:.1f} above sell threshold ({BEARISH_THRESHOLD})"
                 print(f"   ⭕ No action: {action_reason}")
                 trade_summary['skipped'] += 1
                 
@@ -397,7 +438,7 @@ def main():
     print("\n" + "=" * 60)
     
     # Get today's signals
-    signals = get_todays_signals()
+    signals = get_rolling_sentiment_signals()
     
     if not signals:
         print("⚠️  No signals available for trading")
