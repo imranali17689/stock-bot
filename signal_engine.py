@@ -45,6 +45,9 @@ SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY')
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
+# Cache for SPY data to avoid multiple API calls
+spy_cache = {'data': None, 'timestamp': None}
+
 def get_news(ticker: str) -> List[Dict[str, Any]]:
     """
     Fetch company news from Finnhub API for the last 7 days.
@@ -253,12 +256,105 @@ def format_sentiment_output(sentiment: Dict[str, Any]) -> str:
    Confidence: {sentiment['confidence']}
 """
 
+def check_market_regime() -> bool:
+    """
+    Check if market regime allows new bullish entries by comparing SPY to its 5-day SMA.
+    
+    Returns:
+        bool: True if SPY is above 5-day SMA (bullish regime), False otherwise
+    """
+    global spy_cache
+    
+    try:
+        # Check cache first (valid for 1 hour)
+        now = datetime.now()
+        if (spy_cache['data'] is not None and 
+            spy_cache['timestamp'] is not None and 
+            (now - spy_cache['timestamp']).seconds < 3600):
+            
+            spy_data = spy_cache['data']
+            print("📊 Using cached SPY data for market regime check")
+        else:
+            # Fetch fresh SPY data from Finnhub
+            print("📊 Fetching SPY data for market regime analysis...")
+            
+            # Calculate date range for last 6 days (to get 5 trading days)
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=10)  # Extra buffer for weekends
+            
+            # Format dates for Finnhub API (YYYY-MM-DD)
+            from_date = int(start_date.timestamp())
+            to_date = int(end_date.timestamp())
+            
+            # Finnhub stock candles endpoint for SPY
+            url = "https://finnhub.io/api/v1/stock/candle"
+            params = {
+                'symbol': 'SPY',
+                'resolution': 'D',  # Daily
+                'from': from_date,
+                'to': to_date,
+                'token': FINNHUB_API_KEY
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            spy_data = response.json()
+            
+            # Cache the data
+            spy_cache['data'] = spy_data
+            spy_cache['timestamp'] = now
+            
+        # Validate response
+        if spy_data.get('s') != 'ok' or not spy_data.get('c'):
+            print("⚠️ Invalid SPY data received, proceeding with bullish entries (fail-safe)")
+            return True
+            
+        # Get last 5 closing prices
+        closes = spy_data['c'][-5:]  # Last 5 closes
+        
+        if len(closes) < 5:
+            print(f"⚠️ Only {len(closes)} days of SPY data available, proceeding with bullish entries (fail-safe)")
+            return True
+            
+        # Calculate 5-day simple moving average
+        sma_5 = sum(closes) / len(closes)
+        current_price = closes[-1]  # Most recent close
+        
+        # Determine market regime
+        is_bullish_regime = current_price >= sma_5
+        
+        print(f"📊 SPY Market Regime Analysis:")
+        print(f"   💰 Current SPY Price: ${current_price:.2f}")
+        print(f"   📈 5-Day SMA: ${sma_5:.2f}")
+        print(f"   📊 Price vs SMA: {current_price - sma_5:+.2f} ({((current_price - sma_5) / sma_5 * 100):+.1f}%)")
+        
+        if is_bullish_regime:
+            print(f"   🟢 Market Regime: BULLISH (SPY above SMA) - New long entries ALLOWED")
+        else:
+            print(f"   🔴 Market Regime: BEARISH (SPY below SMA) - New long entries BLOCKED")
+            
+        return is_bullish_regime
+        
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error fetching SPY data: {e}")
+        print("⚠️ Proceeding with bullish entries (fail-safe)")
+        return True
+    except Exception as e:
+        print(f"⚠️ Unexpected error in market regime check: {e}")
+        print("⚠️ Proceeding with bullish entries (fail-safe)")
+        return True
+
 def main():
     """
     Main function to analyze sentiment for all tickers in the watchlist.
     """
     print("🤖 Stock Signal Engine Starting...")
     print(f"📊 Analyzing {len(WATCHLIST)} tickers: {', '.join(WATCHLIST)}")
+    print("=" * 80)
+    
+    # Check market regime before processing signals
+    is_bullish_market = check_market_regime()
     print("=" * 80)
     
     results = []
@@ -273,9 +369,18 @@ def main():
         sentiment = score_sentiment(ticker, news_articles)
         results.append(sentiment)
         
-        # Save to database if sentiment analysis was successful
-        article_count = len(news_articles)
-        save_signal_to_db(sentiment, article_count)
+        # Apply market regime filter for bullish signals
+        should_save_signal = True
+        if sentiment['direction'] == 'bullish' and not is_bullish_market:
+            print(f"   🚫 Market regime bearish (SPY below 5-day SMA) - BLOCKING bullish signal for {ticker}")
+            should_save_signal = False
+        
+        # Save to database if sentiment analysis was successful and passes regime filter
+        if should_save_signal:
+            article_count = len(news_articles)
+            save_signal_to_db(sentiment, article_count)
+        else:
+            print(f"   ⚠️ Bullish signal for {ticker} not saved due to bearish market regime")
         
         # Print results
         print(format_sentiment_output(sentiment))
@@ -284,14 +389,24 @@ def main():
     print("🎯 Analysis Complete!")
     
     # Summary statistics
-    bullish_count = sum(1 for r in results if r['direction'] == 'bullish')
+    bullish_analyzed = sum(1 for r in results if r['direction'] == 'bullish')
     bearish_count = sum(1 for r in results if r['direction'] == 'bearish')
     neutral_count = sum(1 for r in results if r['direction'] == 'neutral')
     
+    # Calculate how many bullish signals were actually saved
+    bullish_saved = bullish_analyzed if is_bullish_market else 0
+    bullish_blocked = bullish_analyzed - bullish_saved
+    
     print(f"\n📊 Summary:")
-    print(f"   🟢 Bullish: {bullish_count}")
+    print(f"   🟢 Bullish Analyzed: {bullish_analyzed}")
+    if bullish_blocked > 0:
+        print(f"   🚫 Bullish Blocked (Market Regime): {bullish_blocked}")
+    print(f"   ✅ Bullish Saved: {bullish_saved}")
     print(f"   🔴 Bearish: {bearish_count}")
     print(f"   🟡 Neutral: {neutral_count}")
+    
+    if not is_bullish_market and bullish_analyzed > 0:
+        print(f"\n⚠️ Market Regime Filter Active: {bullish_analyzed} bullish signals blocked from database")
     
     # Top performers
     top_bullish = sorted([r for r in results if r['direction'] == 'bullish'], 
