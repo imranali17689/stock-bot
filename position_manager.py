@@ -27,8 +27,8 @@ SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY')
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 # Risk management constants
-STOP_LOSS_PCT = 0.05      # 5% stop loss
-TAKE_PROFIT_PCT = 0.10    # 10% take profit
+STOP_LOSS_PCT = 0.05      # 5% stop loss threshold (positive value, used as -STOP_LOSS_PCT in comparisons)
+TAKE_PROFIT_PCT = 0.04    # 4% take profit (reduced from 10% for more frequent intraday exits)
 
 # Configure logging
 logging.basicConfig(
