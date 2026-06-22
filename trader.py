@@ -23,12 +23,44 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY')
 
 # Trading configuration
-MAX_POSITION_SIZE = 1000.0  # Maximum $1000 per position
 BULLISH_THRESHOLD = 7       # Buy signals for sentiment_score >= 7
 BEARISH_THRESHOLD = 4       # Sell signals for sentiment_score <= 4
 
+# Confidence-based position sizing tiers
+SIZE_TIERS = {
+    7.0: 750,   # Score 7.0-7.9 = $750
+    8.0: 1000,  # Score 8.0-8.9 = $1000  
+    9.0: 1500   # Score 9.0-10.0 = $1500
+}
+MAX_POSITION_SIZE = 1500.0  # Maximum possible position size
+
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+
+def calculate_position_size(sentiment_score: float, rolling_avg_score: float = None) -> float:
+    """
+    Calculate position size based on sentiment score using confidence-based sizing.
+    
+    Args:
+        sentiment_score (float): Today's sentiment score
+        rolling_avg_score (float): 3-day rolling average score (used for sizing if available)
+        
+    Returns:
+        float: Position size in dollars
+    """
+    # Use rolling average for sizing if available, otherwise use today's score
+    score_for_sizing = rolling_avg_score if rolling_avg_score is not None else sentiment_score
+    
+    # Find the appropriate tier
+    if score_for_sizing >= 9.0:
+        return SIZE_TIERS[9.0]  # $1500
+    elif score_for_sizing >= 8.0:
+        return SIZE_TIERS[8.0]  # $1000
+    elif score_for_sizing >= 7.0:
+        return SIZE_TIERS[7.0]  # $750
+    else:
+        # Fallback (shouldn't happen if BULLISH_THRESHOLD is 7)
+        return SIZE_TIERS[7.0]  # $750
 
 def get_alpaca_headers() -> Dict[str, str]:
     """Get headers for Alpaca API requests."""
@@ -358,13 +390,18 @@ def execute_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
                     print(f"   ⚠️  Already hold {ticker} (${position_symbols[ticker]:,.2f}), skipping buy")
                     trade_summary['skipped'] += 1
                 else:
+                    # Calculate position size based on confidence (sentiment score)
+                    position_size = calculate_position_size(sentiment_score, rolling_avg_score)
+                    
                     print(f"   🟢 BUY signal triggered (Rolling avg: {rolling_avg_score:.1f} >= {BULLISH_THRESHOLD})")
-                    order = place_order(ticker, 'buy', MAX_POSITION_SIZE)
+                    print(f"   💰 Position size: ${position_size:,.0f} (based on score {rolling_avg_score:.1f})")
+                    
+                    order = place_order(ticker, 'buy', position_size)
                     if order:
                         trade_summary['buy_orders'] += 1
-                        trade_summary['total_buy_amount'] += MAX_POSITION_SIZE
-                        # Log trade entry with rolling average
-                        log_trade_entry(ticker, order, MAX_POSITION_SIZE, sentiment_score, direction, rolling_avg_score)
+                        trade_summary['total_buy_amount'] += position_size
+                        # Log trade entry with actual position size used
+                        log_trade_entry(ticker, order, position_size, sentiment_score, direction, rolling_avg_score)
                     else:
                         trade_summary['errors'] += 1
                         
