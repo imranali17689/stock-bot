@@ -195,13 +195,14 @@ Only return the JSON object, no additional text.
             'summary': f'Error during analysis: {str(e)}'
         }
 
-def save_signal_to_db(sentiment: Dict[str, Any], article_count: int) -> bool:
+def save_signal_to_db(sentiment: Dict[str, Any], article_count: int, run_id: str = "unknown") -> bool:
     """
     Save sentiment analysis result to Supabase signals table.
     
     Args:
         sentiment (Dict): Sentiment analysis results
         article_count (int): Number of articles analyzed
+        run_id (str): Unique run identifier for debugging duplicates
         
     Returns:
         bool: True if successful, False otherwise
@@ -226,14 +227,14 @@ def save_signal_to_db(sentiment: Dict[str, Any], article_count: int) -> bool:
         result = supabase.table('signals').insert(signal_data).execute()
         
         if result.data:
-            print(f"💾 Successfully saved {sentiment['ticker']} signal to database (ID: {result.data[0].get('id', 'unknown')})")
+            print(f"💾 [RUN:{run_id}] Successfully saved {sentiment['ticker']} signal to database (ID: {result.data[0].get('id', 'unknown')})")
             return True
         else:
-            print(f"✗ Failed to save {sentiment['ticker']} signal to database")
+            print(f"✗ [RUN:{run_id}] Failed to save {sentiment['ticker']} signal to database")
             return False
             
     except Exception as e:
-        print(f"✗ Database error for {sentiment['ticker']}: {e}")
+        print(f"✗ [RUN:{run_id}] Database error for {sentiment['ticker']}: {e}")
         return False
 
 def format_sentiment_output(sentiment: Dict[str, Any]) -> str:
@@ -349,7 +350,11 @@ def main():
     """
     Main function to analyze sentiment for all tickers in the watchlist.
     """
+    # Generate unique run ID for this execution
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # YYYYMMDD_HHMMSS_mmm
+    
     print("🤖 Stock Signal Engine Starting...")
+    print(f"🆔 Run ID: {run_id}")
     print(f"📊 Analyzing {len(WATCHLIST)} tickers: {', '.join(WATCHLIST)}")
     print("=" * 80)
     
@@ -378,7 +383,7 @@ def main():
         # Save to database if sentiment analysis was successful and passes regime filter
         if should_save_signal:
             article_count = len(news_articles)
-            save_signal_to_db(sentiment, article_count)
+            save_signal_to_db(sentiment, article_count, run_id)
         else:
             print(f"   ⚠️ Bullish signal for {ticker} not saved due to bearish market regime")
         
