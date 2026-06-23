@@ -259,8 +259,8 @@ def log_performance_snapshot() -> bool:
         portfolio_value = float(account_data['portfolio_value'])
         cash = float(account_data['cash'])
         
-        # Get SPY current price from Alpaca
-        spy_url = f"{ALPACA_BASE_URL}/v2/stocks/SPY/trades/latest"
+        # Get SPY current price from Alpaca market data API
+        spy_url = "https://data.alpaca.markets/v2/stocks/SPY/trades/latest"
         spy_response = requests.get(spy_url, headers=headers, timeout=10)
         spy_response.raise_for_status()
         spy_data = spy_response.json()
