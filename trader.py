@@ -7,6 +7,7 @@ Executes trades based on sentiment signals using Alpaca Paper Trading API.
 import os
 import json
 import requests
+import time
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -61,6 +62,156 @@ def calculate_position_size(sentiment_score: float, rolling_avg_score: float = N
     else:
         # Fallback (shouldn't happen if BULLISH_THRESHOLD is 7)
         return SIZE_TIERS[7.0]  # $750
+
+def poll_order_fill(order_id: str, ticker: str, max_wait_seconds: int = 30) -> Optional[Dict[str, Any]]:
+    """
+    Poll Alpaca for order fill status.
+    
+    Args:
+        order_id (str): Alpaca order ID
+        ticker (str): Stock ticker symbol
+        max_wait_seconds (int): Maximum time to wait for fill
+        
+    Returns:
+        Dict: Filled order details or None if not filled/error
+    """
+    print(f"   🔄 Polling order {order_id} for {ticker} (max {max_wait_seconds}s)...")
+    
+    url = f"{ALPACA_BASE_URL}/v2/orders/{order_id}"
+    headers = get_alpaca_headers()
+    
+    start_time = time.time()
+    poll_count = 0
+    
+    while time.time() - start_time < max_wait_seconds:
+        poll_count += 1
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            order_details = response.json()
+            status = order_details.get('status')
+            
+            print(f"   📊 Poll #{poll_count}: Order {order_id} status = {status}")
+            
+            if status == 'filled':
+                filled_avg_price = order_details.get('filled_avg_price')
+                filled_qty = order_details.get('filled_qty')
+                
+                print(f"   ✅ Order filled! Price: ${float(filled_avg_price):.2f}, Qty: {filled_qty}")
+                return order_details
+                
+            elif status in ['rejected', 'canceled', 'expired']:
+                print(f"   ❌ Order {order_id} for {ticker} {status}")
+                return None
+                
+            elif status in ['new', 'pending_new', 'accepted', 'pending_replace']:
+                # Still pending, continue polling
+                if poll_count < 15:  # Don't spam logs for first 15 polls (30 seconds)
+                    time.sleep(2)
+                    continue
+                else:
+                    break
+            else:
+                print(f"   ⚠️ Unknown order status: {status}")
+                time.sleep(2)
+                continue
+                
+        except requests.exceptions.RequestException as e:
+            print(f"   ⚠️ Error polling order {order_id}: {e}")
+            time.sleep(2)
+            continue
+        except Exception as e:
+            print(f"   ⚠️ Unexpected error polling order {order_id}: {e}")
+            time.sleep(2)
+            continue
+    
+    # Timeout reached - check final status and cancel if still pending
+    final_status = "unknown"
+    final_order = None
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            final_order = response.json()
+            final_status = final_order.get('status', 'unknown')
+    except Exception as e:
+        print(f"   ⚠️ Failed to get final order status: {e}")
+    
+    print(f"   ⏰ Order {order_id} for {ticker} not filled after {max_wait_seconds}s, status: {final_status}")
+    
+    # If order is still pending, cancel it to prevent untracked fills
+    if final_status in ['new', 'pending_new', 'accepted', 'pending_replace']:
+        print(f"   🚫 Cancelling pending order {order_id} to prevent untracked position...")
+        
+        try:
+            cancel_url = f"{ALPACA_BASE_URL}/v2/orders/{order_id}"
+            cancel_response = requests.delete(cancel_url, headers=headers, timeout=10)
+            
+            if cancel_response.status_code == 204:
+                print(f"   ✅ Order {order_id} cancelled successfully")
+                return None
+                
+            elif cancel_response.status_code == 422:
+                # Order may have filled or been cancelled between our check and cancel request
+                try:
+                    error_detail = cancel_response.json()
+                    error_message = error_detail.get('message', 'Unknown error')
+                    
+                    if 'filled' in error_message.lower():
+                        print(f"   ⚡ Order {order_id} filled during cancel attempt - checking final state...")
+                        
+                        # Get the filled order details
+                        try:
+                            final_response = requests.get(url, headers=headers, timeout=10)
+                            if final_response.status_code == 200:
+                                filled_order = final_response.json()
+                                if filled_order.get('status') == 'filled':
+                                    print(f"   🎯 Order {order_id} was actually filled! Returning fill details...")
+                                    return filled_order
+                        except:
+                            pass
+                            
+                        print(f"   ⚠️ Order filled but couldn't retrieve details - human check needed")
+                        
+                    elif 'cancelled' in error_message.lower() or 'canceled' in error_message.lower():
+                        print(f"   ✅ Order {order_id} was already cancelled")
+                        return None
+                        
+                    else:
+                        print(f"   ⚠️ Cancel failed: {error_message}")
+                        
+                except Exception as parse_error:
+                    print(f"   ⚠️ Cancel returned 422 but couldn't parse error: {parse_error}")
+                    
+            else:
+                print(f"   ❌ Cancel failed with status {cancel_response.status_code}")
+                try:
+                    error_detail = cancel_response.json()
+                    print(f"   Error details: {error_detail}")
+                except:
+                    pass
+                    
+        except requests.exceptions.RequestException as cancel_error:
+            print(f"   ❌ Cancel request failed: {cancel_error}")
+            
+        except Exception as cancel_error:
+            print(f"   ❌ Unexpected error during cancel: {cancel_error}")
+            
+        print(f"   🚨 ALERT: Order {order_id} for {ticker} may still be active - manual check required at Alpaca")
+        
+    elif final_status == 'filled':
+        print(f"   ⚡ Order {order_id} filled during timeout check!")
+        return final_order
+        
+    elif final_status in ['rejected', 'canceled', 'cancelled', 'expired']:
+        print(f"   ✅ Order {order_id} already in terminal state: {final_status}")
+        
+    else:
+        print(f"   ⚠️ Unknown final status '{final_status}' - manual check recommended")
+        
+    return None
 
 def get_alpaca_headers() -> Dict[str, str]:
     """Get headers for Alpaca API requests."""
@@ -199,17 +350,19 @@ def get_positions() -> List[Dict[str, Any]]:
         print(f"✗ Unexpected error fetching positions: {e}")
         return []
 
-def log_trade_entry(ticker: str, order_response: Dict[str, Any], notional_value: float, 
-                   sentiment_score: int, direction: str, rolling_avg_score: float = None) -> bool:
+def log_trade_entry(ticker: str, notional_value: float, sentiment_score: int, direction: str, 
+                   entry_price: float, shares: float, rolling_avg_score: float = None) -> bool:
     """
     Log trade entry to Supabase trades table.
     
     Args:
         ticker (str): Stock symbol
-        order_response (Dict): Alpaca order response
         notional_value (float): Dollar amount invested
         sentiment_score (int): Sentiment score from signal
         direction (str): Signal direction (bullish/bearish)
+        entry_price (float): Actual fill price
+        shares (float): Actual filled quantity
+        rolling_avg_score (float): 3-day rolling average score
         
     Returns:
         bool: True if logged successfully, False otherwise
@@ -221,7 +374,8 @@ def log_trade_entry(ticker: str, order_response: Dict[str, Any], notional_value:
             'notional_value': notional_value,
             'sentiment_score': sentiment_score,
             'direction': direction,
-            'shares': float(order_response.get('filled_qty', 0)) if order_response.get('filled_qty') else 0.0,
+            'entry_price': entry_price,
+            'shares': shares,
             'rolling_avg_score': rolling_avg_score if rolling_avg_score is not None else sentiment_score
         }
         
@@ -365,11 +519,12 @@ def execute_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
         'total_sell_amount': 0.0
     }
     
-    # Get current positions to check what we own
+    # Get current positions to check what we own (checked once at start, not during processing)
     current_positions = get_positions()
     position_symbols = {pos['symbol']: float(pos['market_value']) for pos in current_positions}
     
     print(f"\n🎯 Processing {len(signals)} signals...")
+    print(f"📊 Current positions: {list(position_symbols.keys()) if position_symbols else 'None'}")
     
     for signal in signals:
         ticker = signal['ticker']
@@ -396,12 +551,31 @@ def execute_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
                     print(f"   🟢 BUY signal triggered (Rolling avg: {rolling_avg_score:.1f} >= {BULLISH_THRESHOLD})")
                     print(f"   💰 Position size: ${position_size:,.0f} (based on score {rolling_avg_score:.1f})")
                     
+                    # Place the order
                     order = place_order(ticker, 'buy', position_size)
-                    if order:
-                        trade_summary['buy_orders'] += 1
-                        trade_summary['total_buy_amount'] += position_size
-                        # Log trade entry with actual position size used
-                        log_trade_entry(ticker, order, position_size, sentiment_score, direction, rolling_avg_score)
+                    if order and order.get('id'):
+                        order_id = order['id']
+                        
+                        # Poll for order fill
+                        filled_order = poll_order_fill(order_id, ticker, max_wait_seconds=30)
+                        
+                        if filled_order:
+                            # Order filled successfully - log with actual fill data
+                            entry_price = float(filled_order['filled_avg_price'])
+                            shares = float(filled_order['filled_qty'])
+                            
+                            trade_summary['buy_orders'] += 1
+                            trade_summary['total_buy_amount'] += position_size
+                            
+                            # Log trade entry with actual fill data
+                            log_trade_entry(ticker, position_size, sentiment_score, direction, 
+                                          entry_price, shares, rolling_avg_score)
+                            
+                            print(f"   💾 Trade logged: {shares:.4f} shares @ ${entry_price:.2f}")
+                        else:
+                            # Order not filled or rejected - don't log incomplete trade
+                            print(f"   ⚠️ Order not filled for {ticker}, skipping trade log")
+                            trade_summary['errors'] += 1
                     else:
                         trade_summary['errors'] += 1
                         
