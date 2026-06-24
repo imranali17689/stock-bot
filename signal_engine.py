@@ -197,7 +197,7 @@ Only return the JSON object, no additional text.
 
 def save_signal_to_db(sentiment: Dict[str, Any], article_count: int, run_id: str = "unknown") -> bool:
     """
-    Save sentiment analysis result to Supabase signals table.
+    Save sentiment analysis result to Supabase signals table using upsert for idempotency.
     
     Args:
         sentiment (Dict): Sentiment analysis results
@@ -212,7 +212,8 @@ def save_signal_to_db(sentiment: Dict[str, Any], article_count: int, run_id: str
         return False
     
     try:
-        # Prepare data for insertion
+        now = datetime.now()
+        # Prepare data for upsert (includes signal_date for uniqueness)
         signal_data = {
             'ticker': sentiment['ticker'],
             'sentiment_score': sentiment['sentiment_score'],
@@ -220,14 +221,20 @@ def save_signal_to_db(sentiment: Dict[str, Any], article_count: int, run_id: str
             'confidence': sentiment['confidence'],
             'summary': sentiment['summary'],
             'article_count': article_count,
-            'created_at': datetime.now().isoformat()
+            'signal_date': now.date().isoformat(),  # Just the date (YYYY-MM-DD)
+            'created_at': now.isoformat()  # Full timestamp
         }
         
-        # Insert into Supabase
-        result = supabase.table('signals').insert(signal_data).execute()
+        # Upsert into Supabase (update if ticker+signal_date exists, insert if not)
+        result = supabase.table('signals').upsert(
+            signal_data,
+            on_conflict='ticker,signal_date'
+        ).execute()
         
         if result.data:
-            print(f"💾 [RUN:{run_id}] Successfully saved {sentiment['ticker']} signal to database (ID: {result.data[0].get('id', 'unknown')})")
+            # Determine if this was an insert (new) or update (retry)
+            operation = "updated" if len(result.data) > 0 and result.data[0].get('created_at') != now.isoformat() else "saved"
+            print(f"💾 [RUN:{run_id}] Successfully {operation} {sentiment['ticker']} signal to database (ID: {result.data[0].get('id', 'unknown')})")
             return True
         else:
             print(f"✗ [RUN:{run_id}] Failed to save {sentiment['ticker']} signal to database")
