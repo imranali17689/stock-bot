@@ -187,10 +187,10 @@ def main():
         replace_existing=True
     )
     
-    # Job 2: Trader at 8:30 AM Eastern daily (30 minutes after signal engine)
+    # Job 2: Trader at 9:31 AM Eastern (1 minute after market open, Mon-Fri)
     scheduler.add_job(
         func=trader_job,
-        trigger=CronTrigger(hour=8, minute=30, timezone=eastern),
+        trigger=CronTrigger(hour=9, minute=31, day_of_week='mon-fri', timezone=eastern),
         id='daily_trader',
         name='Daily Stock Trading Execution',
         max_instances=1,  # Prevent overlapping jobs
@@ -222,7 +222,7 @@ def main():
     
     logger.info("📅 Scheduled daily jobs:")
     logger.info("   🔍 Signal Engine: 8:00 AM Eastern Time")
-    logger.info("   💰 Trader: 8:30 AM Eastern Time")
+    logger.info("   💰 Trader: 9:31 AM Eastern Time (Mon-Fri)")
     logger.info("   🛡️ Position Manager: Every 30 min, 9:00 AM - 3:30 PM (Mon-Fri)")
     logger.info("   🔔 EOD Close: 3:45 PM Eastern Time (Mon-Fri)")
     logger.info("   ⏱️  30-minute delay ensures signal analysis completes first")
